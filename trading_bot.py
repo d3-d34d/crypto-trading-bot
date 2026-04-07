@@ -257,6 +257,8 @@ Be data-driven, concise, and decisive. Never hedge or be vague."""
         except json.JSONDecodeError as e:
             return {"error": f"JSON parse error: {e}", "market_summary": "Analysis failed – JSON error"}
         except Exception as e:
+            with open("error_log.txt", "w") as f:
+                f.write(str(e))
             return {"error": str(e), "market_summary": f"Analysis failed: {e}"}
 
 
