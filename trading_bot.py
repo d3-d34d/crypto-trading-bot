@@ -287,6 +287,7 @@ class TradingBot:
         self.next_analysis_at: float       = time.time()   # run immediately
         self.analysis_count:  int          = 0
         self.lock        = threading.Lock()
+        self.start_time  = datetime.now()  # track runtime
 
     # ── logging helper ────────────────────────
     def _log(self, msg: str, style: str = "white"):
@@ -394,6 +395,7 @@ class TradingBot:
             trades      = list(self.engine.trades)
             holdings    = dict(self.engine.holdings)
             usdt_bal    = self.engine.usdt
+            initial_bal = self.engine.initial
             total_val   = self.engine.total_value(prices)
             pnl         = self.engine.pnl(prices)
             pnl_pct     = self.engine.pnl_pct(prices)
@@ -404,16 +406,43 @@ class TradingBot:
 
         secs_left  = max(0, int(next_at - time.time()))
         pnl_color  = "bright_green" if pnl >= 0 else "bright_red"
+        bal_color  = "bright_green" if total_val >= initial_bal else "bright_red"
+
+        # ── RUNTIME ───────────────────────────────────────
+        elapsed    = datetime.now() - self.start_time
+        total_secs = int(elapsed.total_seconds())
+        days       = total_secs // 86400
+        hours      = (total_secs % 86400) // 3600
+        mins       = (total_secs % 3600) // 60
+        if days > 0:
+            runtime_str = f"{days}d {hours:02d}h {mins:02d}m"
+        elif hours > 0:
+            runtime_str = f"{hours}h {mins:02d}m"
+        else:
+            runtime_str = f"{mins}m {total_secs % 60:02d}s"
+
+        # ── PERFORMANCE STATS ─────────────────────────────
+        sell_trades   = [t for t in trades if t["side"] == "SELL"]
+        wins          = [t for t in sell_trades if t.get("pnl", 0) > 0]
+        losses        = [t for t in sell_trades if t.get("pnl", 0) <= 0]
+        realized_pnl  = sum(t.get("pnl", 0) for t in sell_trades)
+        win_rate      = (len(wins) / len(sell_trades) * 100) if sell_trades else 0
+        best_trade    = max((t.get("pnl", 0) for t in sell_trades), default=0)
+        worst_trade   = min((t.get("pnl", 0) for t in sell_trades), default=0)
+        total_trades  = len(trades)
 
         # ── HEADER ────────────────────────────────────────
         now_str = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
         header = Text(justify="center")
-        header.append("⚡ CLAUDE TRADING BOT ", style="bold bright_cyan")
-        header.append("│ PAPER TRADING │ ", style="bold yellow")
-        header.append(f"{now_str}  ", style="dim white")
-        header.append(f"│  Portfolio: ${total_val:,.2f}  ", style="bold white")
-        header.append(f"│  P&L: ", style="white")
-        header.append(f"${pnl:+,.2f}  ({pnl_pct:+.2f}%)", style=f"bold {pnl_color}")
+        header.append("⚡ CLAUDE TRADING BOT  ", style="bold bright_cyan")
+        header.append("│  ", style="dim")
+        header.append(f"🕐 {runtime_str}  ", style="bold white")
+        header.append("│  Balance: ", style="white")
+        header.append(f"${total_val:,.2f}  ", style=f"bold {bal_color}")
+        header.append(f"({pnl:+,.2f} / {pnl_pct:+.2f}%)  ", style=f"bold {pnl_color}")
+        header.append("│  Start: ", style="dim")
+        header.append(f"${initial_bal:,.2f}  ", style="dim white")
+        header.append(f"│  {now_str}", style="dim")
 
         # ── PRICES & SIGNALS TABLE ────────────────────────
         pt = Table(box=box.SIMPLE_HEAD, show_header=True,
@@ -493,12 +522,20 @@ class TradingBot:
         ptf.add_column("Entry",    justify="right",  width=12)
         ptf.add_column("P&L",      justify="right",  width=10)
 
-        ptf.add_row("USDT", "—", f"${usdt_bal:,.2f}", "—", "—")
+        # USDT row — color based on overall portfolio P&L
+        usdt_sty = "bold bright_green" if pnl >= 0 else "bold bright_red"
+        ptf.add_row(
+            Text("USDT", style=usdt_sty),
+            "—",
+            Text(f"${usdt_bal:,.2f}", style=usdt_sty),
+            "—",
+            Text(f"${pnl:+,.2f}", style=usdt_sty),
+        )
         for sym, qty in holdings.items():
             if qty > 0.0000001:
-                p     = prices.get(sym, 0)
-                val   = qty * p
-                entry = self.engine.open_positions.get(sym, 0)
+                p       = prices.get(sym, 0)
+                val     = qty * p
+                entry   = self.engine.open_positions.get(sym, 0)
                 pos_pnl = (p - entry) * qty if entry else 0
                 pnl_sty = "bright_green" if pos_pnl >= 0 else "bright_red"
                 ptf.add_row(
@@ -509,25 +546,53 @@ class TradingBot:
                     Text(f"${pos_pnl:+.2f}", style=pnl_sty),
                 )
 
-        # ── TRADE LOG TABLE ────────────────────────────────
+        # ── PERFORMANCE STATS TABLE ───────────────────────
+        stats = Table(box=box.SIMPLE_HEAD, show_header=False, expand=True)
+        stats.add_column("Key",   style="dim cyan",   width=18)
+        stats.add_column("Value", justify="right",     width=16)
+
+        rp_color = "bright_green" if realized_pnl >= 0 else "bright_red"
+        bt_color = "bright_green" if best_trade  >= 0 else "bright_red"
+        wt_color = "bright_red"   if worst_trade <= 0 else "bright_green"
+        wr_color = "bright_green" if win_rate >= 50 else "bright_red"
+
+        stats.add_row("⏱  Running",       Text(runtime_str,                     style="bold white"))
+        stats.add_row("💰 Start Capital",  Text(f"${initial_bal:,.2f}",          style="dim white"))
+        stats.add_row("📈 Portfolio Value",Text(f"${total_val:,.2f}",            style=f"bold {bal_color}"))
+        stats.add_row("💵 Realized P&L",   Text(f"${realized_pnl:+,.2f}",        style=f"bold {rp_color}"))
+        stats.add_row("🏆 Win Rate",        Text(f"{win_rate:.1f}%  ({len(wins)}W / {len(losses)}L)", style=wr_color))
+        stats.add_row("🔥 Best Trade",      Text(f"${best_trade:+,.2f}",          style=bt_color))
+        stats.add_row("💀 Worst Trade",     Text(f"${worst_trade:+,.2f}",         style=wt_color))
+        stats.add_row("📊 Total Trades",    Text(str(total_trades),               style="white"))
+        stats.add_row("🔍 Analyses Run",    Text(str(self.analysis_count),        style="white"))
+
+        # ── TRADE LOG TABLE (with P&L column) ─────────────
         tlt = Table(box=box.SIMPLE_HEAD, show_header=True,
                     header_style="bold yellow", expand=True)
         tlt.add_column("Time",   width=8)
         tlt.add_column("Side",   width=5)
-        tlt.add_column("Symbol", width=9)
-        tlt.add_column("Price",  justify="right", width=12)
-        tlt.add_column("USDT",   justify="right", width=11)
-        tlt.add_column("Reason", width=40)
+        tlt.add_column("Sym",    width=6)
+        tlt.add_column("Price",  justify="right", width=11)
+        tlt.add_column("USDT",   justify="right", width=10)
+        tlt.add_column("Trade P&L", justify="right", width=10)
+        tlt.add_column("Reason", width=32)
 
         for t in reversed(trades[-10:]):
             side_sty = "bold bright_green" if t["side"] == "BUY" else "bold bright_red"
+            trade_pnl = t.get("pnl", None)
+            if trade_pnl is not None:
+                pnl_txt = Text(f"${trade_pnl:+,.2f}",
+                               style="bright_green" if trade_pnl >= 0 else "bright_red")
+            else:
+                pnl_txt = Text("—", style="dim")
             tlt.add_row(
                 t["time"],
                 Text(t["side"], style=side_sty),
                 t["symbol"].replace("USDT", ""),
                 f"${t['price']:,.2f}",
                 f"${t['usdt']:,.2f}",
-                t.get("reason", "")[:40],
+                pnl_txt,
+                t.get("reason", "")[:32],
             )
 
         # ── AI LOG ────────────────────────────────────────
@@ -550,15 +615,17 @@ class TradingBot:
             Layout(name="indicators", ratio=2),
         )
         layout["right"].split_column(
-            Layout(name="portfolio",  ratio=2),
-            Layout(name="tradelog",   ratio=3),
+            Layout(name="stats",     ratio=3),
+            Layout(name="portfolio", ratio=2),
+            Layout(name="tradelog",  ratio=4),
         )
 
         layout["header"].update(Panel(header, style="bold"))
-        layout["prices"].update(Panel(pt,  title="[bold bright_cyan]📈 Live Prices & AI Signals[/]"))
+        layout["prices"].update(Panel(pt,    title="[bold bright_cyan]📈 Live Prices & AI Signals[/]"))
         layout["indicators"].update(Panel(it, title="[bold magenta]📊 Technical Indicators[/]"))
-        layout["portfolio"].update(Panel(ptf, title="[bold bright_green]💼 Portfolio[/]"))
-        layout["tradelog"].update(Panel(tlt, title="[bold yellow]📋 Trade History (latest 10)[/]"))
+        layout["stats"].update(Panel(stats,   title="[bold white]📊 Performance Stats[/]"))
+        layout["portfolio"].update(Panel(ptf,  title="[bold bright_green]💼 Portfolio[/]"))
+        layout["tradelog"].update(Panel(tlt,   title="[bold yellow]📋 Trade History (latest 10)[/]"))
         layout["ai"].update(Panel(
             ai_log,
             title=f"[bold cyan]🤖 Activity Log  —  Next analysis in {secs_left}s[/]",
